@@ -422,6 +422,10 @@ _PADDLEOCR_VL_MODEL_TYPES: frozenset[str] = frozenset({"paddleocr_vl"})
 _PADDLEOCR_VL_ARCHITECTURES: frozenset[str] = frozenset(
     {"PaddleOCRVLForConditionalGeneration"}
 )
+# The checkpoints spell the model type with a hyphen; the mlx_vlm module that
+# implements it is ``lfm2_vl``.
+_LFM2_VL_MODEL_TYPES: frozenset[str] = frozenset({"lfm2-vl"})
+_LFM2_VL_ARCHITECTURES: frozenset[str] = frozenset({"Lfm2VlForConditionalGeneration"})
 
 
 class DefaultModelAdapter(ModelAdapter):
@@ -979,6 +983,16 @@ validate_paged_attention_support` only when ``kv_heads_per_layer`` has
             return cast(
                 MultimodalRuntimeAdapter,
                 PaddleOCRVLMultimodalAdapter.from_loaded_model(model),
+            )
+
+        if model_type in _LFM2_VL_MODEL_TYPES or any(
+            arch in _LFM2_VL_ARCHITECTURES for arch in architectures
+        ):
+            from vllm_metal.multimodal.lfm2_vl import Lfm2VlMultimodalAdapter
+
+            return cast(
+                MultimodalRuntimeAdapter,
+                Lfm2VlMultimodalAdapter.from_loaded_model(model),
             )
 
         return None
