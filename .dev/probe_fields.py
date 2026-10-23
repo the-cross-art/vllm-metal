@@ -4,8 +4,6 @@ Runs vLLM's own multimodal processing path without starting an engine.
 Debug only; never part of the PR.
 """
 
-import numpy as np
-from PIL import Image
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 import vllm.multimodal.inputs as mmi
@@ -30,16 +28,12 @@ mmi.MultiModalFlatField.build_elems = _traced
 
 mc = ModelConfig(model=CKPT, limit_mm_per_prompt={"image": 1})
 proc = MULTIMODAL_REGISTRY.create_processor(mc)
-img = Image.fromarray((np.random.rand(448, 336, 3) * 255).astype(np.uint8))
 
 print("fields seen:")
 try:
-    out = proc.apply(
-        prompt="<image>describe",
-        mm_data={"image": [img]},
-        hf_processor_mm_kwargs={},
-    )
-    print("apply() OK")
+    # Exactly the call the engine makes in MultiModalBudget.
+    out = proc.get_dummy_mm_inputs({"image": 1})
+    print("get_dummy_mm_inputs() OK")
     for mod in out["mm_kwargs"]:
         for index, item in enumerate(out["mm_kwargs"][mod]):
             for key in item:
@@ -47,4 +41,4 @@ try:
                 shape = getattr(data, "shape", None)
                 print(f"  {mod}[{index}].{key:18} {type(data).__name__} {shape}")
 except Exception as exc:
-    print(f"apply() FAILED: {type(exc).__name__}: {exc}")
+    print(f"get_dummy_mm_inputs() FAILED: {type(exc).__name__}: {exc}")
