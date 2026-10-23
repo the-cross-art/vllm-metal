@@ -1,0 +1,50 @@
+"""Find which multimodal field is not a tensor, and what it actually is.
+
+Runs vLLM's own multimodal processing path without starting an engine.
+Debug only; never part of the PR.
+"""
+
+import numpy as np
+from PIL import Image
+from vllm.config import ModelConfig
+from vllm.multimodal import MULTIMODAL_REGISTRY
+import vllm.multimodal.inputs as mmi
+
+CKPT = "/Users/imran.nazir/lfm2-vl-test"
+
+# Report instead of asserting, so every field is visible, not just the first
+# one that fails.
+_orig = mmi.MultiModalFlatField.build_elems
+
+
+def _traced(self, modality, key, data):
+    nested = not mmi.is_list_of(self.slices, slice, check="all")
+    print(
+        f"  {key:22} type={type(data).__name__:12} nested_slices={nested} "
+        f"n_slices={len(self.slices)} shape={getattr(data, 'shape', None)}"
+    )
+    return _orig(self, modality, key, data)
+
+
+mmi.MultiModalFlatField.build_elems = _traced
+
+mc = ModelConfig(model=CKPT, limit_mm_per_prompt={"image": 1})
+proc = MULTIMODAL_REGISTRY.create_processor(mc)
+img = Image.fromarray((np.random.rand(448, 336, 3) * 255).astype(np.uint8))
+
+print("fields seen:")
+try:
+    out = proc.apply(
+        prompt="<image>describe",
+        mm_data={"image": [img]},
+        hf_processor_mm_kwargs={},
+    )
+    print("apply() OK")
+    for mod in out["mm_kwargs"]:
+        for index, item in enumerate(out["mm_kwargs"][mod]):
+            for key in item:
+                data = item[key].data
+                shape = getattr(data, "shape", None)
+                print(f"  {mod}[{index}].{key:18} {type(data).__name__} {shape}")
+except Exception as exc:
+    print(f"apply() FAILED: {type(exc).__name__}: {exc}")
