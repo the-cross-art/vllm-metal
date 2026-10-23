@@ -31,12 +31,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # Generic over two log-prob dicts despite the module name; not Gemma 4 specific.
 from gemma4_mask_modes import kl_over_support  # noqa: E402
 
-# The 450M MLX conversions declare model_type "lfm2-vl", which Transformers
-# does not register, so they fail in AutoConfig before the engine starts.  The
-# 3B conversion uses "lfm2_vl" and loads.
-DEFAULT_CHECKPOINT = "LiquidAI/LFM2.5-VL-3B-MLX-4bit"
+# The MLX conversions are packaged for mlx-vlm rather than Transformers: the
+# 450M declares model_type "lfm2-vl", which Transformers does not register,
+# and the 3B names an image processor class Transformers does not have.  The
+# 1.6B checkpoint is packaged for Transformers and loads.
+DEFAULT_CHECKPOINT = "LiquidAI/LFM2.5-VL-1.6B"
 PROMPT = "Describe the image."
-TOP_K = 20
+# AGENTS.md requires --top-k 5 for model parity.
+TOP_K = 5
 
 # bf16 noise between the Metal paged path and MLX's own SDPA.  The Gemma 4
 # smoke uses the same scale for the same comparison.
@@ -119,13 +121,19 @@ def _reference_logprobs(checkpoint: str, image: Image.Image) -> dict[int, float]
         image_token_index=None,
         add_special_tokens=False,
     )
-    # pixel_values rides positionally; spatial_shapes and the rest as kwargs.
+    # mlx-vlm 0.7.6 takes (input_ids, pixel_values, mask, cache=None, **kwargs);
+    # the mask is positional, so it cannot ride in kwargs.
     kwargs = {
         key: value
         for key, value in inputs.items()
         if key not in ("input_ids", "pixel_values", "attention_mask")
     }
-    out = model(inputs["input_ids"], inputs.get("pixel_values"), **kwargs)
+    out = model(
+        inputs["input_ids"],
+        inputs.get("pixel_values"),
+        inputs.get("attention_mask"),
+        **kwargs,
+    )
     logits = out.logits if hasattr(out, "logits") else out
     row = logits[0, -1].astype(mx.float32)
     logprobs = row - mx.logsumexp(row)
