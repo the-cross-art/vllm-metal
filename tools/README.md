@@ -135,9 +135,10 @@ PYTORCH_ENABLE_MPS_FALLBACK=0 python tools/lfm2_vl_vision_smoke.py \
   --checkpoint LiquidAI/LFM2.5-VL-1.6B
 ```
 
-Use a checkpoint whose `model_type` is `lfm2_vl`. The 450M MLX conversions
-declare `lfm2-vl`, which Transformers does not register, so they fail in
-`AutoConfig` before the engine starts.
+Use a checkpoint packaged for Transformers. The MLX conversions are packaged
+for mlx-vlm: the 450M declares `model_type: lfm2-vl`, which Transformers does
+not register, and the 3B names `Lfm2VlNumpyImageProcessor`, which exists in no
+Transformers release. Both fail before the engine starts.
 
 Prints `SMOKE PASS` on success. The KL tolerances assume bf16 noise between the
 Metal paged path and MLX's own SDPA; a failure well outside them points at the
