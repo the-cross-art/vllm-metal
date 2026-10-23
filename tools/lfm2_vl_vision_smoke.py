@@ -75,6 +75,10 @@ def _start(checkpoint: str):
         max_num_batched_tokens=2048,
         gpu_memory_utilization=0.3,
         limit_mm_per_prompt={"image": 1},
+        # vLLM 0.32.0's cached multimodal path raises "torch.Tensor is
+        # required for multiple slices" on LFM2-VL while the uncached path
+        # processes the same inputs cleanly, so run without the cache.
+        mm_processor_cache_gb=0,
     )
 
 
