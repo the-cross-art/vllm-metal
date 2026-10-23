@@ -132,8 +132,12 @@ it, but two images collapsing to one distribution will.
 ```bash
 PYTORCH_ENABLE_MPS_FALLBACK=0 python tools/lfm2_vl_vision_smoke.py
 PYTORCH_ENABLE_MPS_FALLBACK=0 python tools/lfm2_vl_vision_smoke.py \
-  --checkpoint LiquidAI/LFM2.5-VL-3B-MLX-4bit
+  --checkpoint LiquidAI/LFM2.5-VL-1.6B
 ```
+
+Use a checkpoint whose `model_type` is `lfm2_vl`. The 450M MLX conversions
+declare `lfm2-vl`, which Transformers does not register, so they fail in
+`AutoConfig` before the engine starts.
 
 Prints `SMOKE PASS` on success. The KL tolerances assume bf16 noise between the
 Metal paged path and MLX's own SDPA; a failure well outside them points at the

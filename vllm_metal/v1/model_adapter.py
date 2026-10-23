@@ -422,9 +422,12 @@ _PADDLEOCR_VL_MODEL_TYPES: frozenset[str] = frozenset({"paddleocr_vl"})
 _PADDLEOCR_VL_ARCHITECTURES: frozenset[str] = frozenset(
     {"PaddleOCRVLForConditionalGeneration"}
 )
-# The checkpoints spell the model type with a hyphen; the mlx_vlm module that
-# implements it is ``lfm2_vl``.
-_LFM2_VL_MODEL_TYPES: frozenset[str] = frozenset({"lfm2-vl"})
+# Both spellings are in the wild: Transformers registers ``lfm2_vl`` and the
+# LFM2.5-VL-3B and 1.6B checkpoints use it, while the 450M MLX conversions
+# declare ``lfm2-vl``.  Transformers rejects the hyphen, so those checkpoints
+# fail before this dispatch, but accept it here so the set describes the
+# family rather than one conversion.
+_LFM2_VL_MODEL_TYPES: frozenset[str] = frozenset({"lfm2_vl", "lfm2-vl"})
 _LFM2_VL_ARCHITECTURES: frozenset[str] = frozenset({"Lfm2VlForConditionalGeneration"})
 
 
