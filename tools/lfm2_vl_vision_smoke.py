@@ -31,7 +31,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # Generic over two log-prob dicts despite the module name; not Gemma 4 specific.
 from gemma4_mask_modes import kl_over_support  # noqa: E402
 
-DEFAULT_CHECKPOINT = "LiquidAI/LFM2.5-VL-450M-MLX-4bit"
+# The 450M MLX conversions declare model_type "lfm2-vl", which Transformers
+# does not register, so they fail in AutoConfig before the engine starts.  The
+# 3B conversion uses "lfm2_vl" and loads.
+DEFAULT_CHECKPOINT = "LiquidAI/LFM2.5-VL-3B-MLX-4bit"
 PROMPT = "Describe the image."
 TOP_K = 20
 

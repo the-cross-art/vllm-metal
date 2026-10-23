@@ -932,16 +932,17 @@ class TestBuildMultimodalAdapter:
 
         assert isinstance(adapter, PaddleOCRVLMultimodalAdapter)
 
-    def test_builds_lfm2_vl_adapter_from_model_type(self) -> None:
-        # The checkpoints spell it "lfm2-vl" with a hyphen while the mlx_vlm
-        # module is "lfm2_vl"; dispatch must key on the checkpoint spelling.
+    @pytest.mark.parametrize("model_type", ["lfm2_vl", "lfm2-vl"])
+    def test_builds_lfm2_vl_adapter_from_model_type(self, model_type: str) -> None:
+        # Both spellings ship: Transformers and the 3B/1.6B checkpoints use
+        # "lfm2_vl", the 450M MLX conversions use "lfm2-vl".
         language_model = _Lfm2VlLanguageModelStub()
         model = SimpleNamespace(
             config=SimpleNamespace(image_token_index=396),
             language_model=language_model,
             encode_images=lambda *a, **k: [],
         )
-        hf_config = SimpleNamespace(model_type="lfm2-vl")
+        hf_config = SimpleNamespace(model_type=model_type)
 
         adapter = DefaultModelAdapter().build_multimodal_adapter(model, hf_config)
 
