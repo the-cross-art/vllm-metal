@@ -4,9 +4,9 @@ Runs vLLM's own multimodal processing path without starting an engine.
 Debug only; never part of the PR.
 """
 
+import vllm.multimodal.inputs as mmi
 from vllm.config import ModelConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-import vllm.multimodal.inputs as mmi
 
 CKPT = "/Users/imran.nazir/lfm2-vl-test"
 
