@@ -8,6 +8,7 @@ diagnosable.
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 from collections.abc import Callable, Iterator, Mapping
@@ -947,6 +948,74 @@ def _wrap_model_sanitize(
     _patched_sanitize._vllm_metal_original_sanitize = original_sanitize
     model_cls.sanitize = _patched_sanitize
     return True
+
+
+_MLX_VLM_PATCHED_PROCESSORS: tuple[tuple[str, str], ...] = (
+    ("transformers.models.lfm2_vl.processing_lfm2_vl", "Lfm2VlProcessor"),
+)
+_MLX_VLM_PATCHED_ATTRS: tuple[str, ...] = ("__init__", "from_pretrained", "__call__")
+_MISSING = object()
+
+
+def _processor_classes_to_restore() -> list[tuple[Any, dict[str, Any]]]:
+    """Snapshot the processor class attributes mlx-vlm rebinds on import."""
+    snapshots: list[tuple[Any, dict[str, Any]]] = []
+    for module_name, cls_name in _MLX_VLM_PATCHED_PROCESSORS:
+        try:
+            module = importlib.import_module(module_name)
+        except ImportError as exc:
+            logger.debug("Skipping %s processor snapshot: %s", cls_name, exc)
+            continue
+        cls = getattr(module, cls_name, None)
+        if cls is None:
+            continue
+        snapshots.append(
+            (
+                cls,
+                {
+                    name: cls.__dict__.get(name, _MISSING)
+                    for name in _MLX_VLM_PATCHED_ATTRS
+                },
+            )
+        )
+    return snapshots
+
+
+@contextmanager
+def mlx_vlm_processor_scope() -> Iterator[None]:
+    """Keep mlx-vlm's global processor rebinding out of vLLM's processing path.
+
+    Importing ``mlx_vlm.models.lfm2_vl`` rebinds transformers'
+    ``Lfm2VlProcessor.__init__``, ``.from_pretrained`` and ``.__call__`` so every
+    instance swaps in mlx-vlm's ``Lfm2VlNumpyImageProcessor``, which returns
+    ``numpy.ndarray``. vLLM's ``NestedTensors`` contract is ``torch.Tensor``, and
+    ``MultiModalFieldConfig.flat_from_sizes`` always builds tuple slices, so
+    ``MultiModalFlatField.build_elems`` asserts "torch.Tensor is required for
+    multiple slices" while the scheduler profiles the encoder budget — the engine
+    dies before serving a request.
+
+    mlx-vlm needs the NumPy processor for its own forward path, and the processor
+    instance it returns from ``load`` keeps it: restoring the class attributes
+    afterwards only affects instances vLLM builds later, which are the ones that
+    must honor vLLM's contract.
+    """
+    snapshots = _processor_classes_to_restore()
+    try:
+        yield
+    finally:
+        for cls, attrs in snapshots:
+            for name, original in attrs.items():
+                current = cls.__dict__.get(name, _MISSING)
+                if current is original:
+                    continue
+                if original is _MISSING:
+                    try:
+                        delattr(cls, name)
+                    except AttributeError:
+                        pass
+                else:
+                    setattr(cls, name, original)
+                logger.debug("Restored %s.%s after mlx-vlm load", cls.__name__, name)
 
 
 @contextmanager

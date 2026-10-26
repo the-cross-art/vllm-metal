@@ -16,7 +16,11 @@ from vllm.logger import init_logger
 
 from vllm_metal.attention.impls.mla import MLA_DEFAULT_QK_ROPE_HEAD_DIM
 from vllm_metal.attention.runtime.factory import build_hybrid_runtime_plan
-from vllm_metal.compat import apply_compat_patches, embedding_load_scope
+from vllm_metal.compat import (
+    apply_compat_patches,
+    embedding_load_scope,
+    mlx_vlm_processor_scope,
+)
 from vllm_metal.compiled_mlp import CompiledMLPBlocks
 from vllm_metal.config import get_config
 from vllm_metal.gguf.source import GGUFLoadSource
@@ -406,9 +410,10 @@ class ModelLifecycle:
 
         elif is_vlm:
             load_label = "MLX-VLM model"
-            model, tokenizer = mlx_vlm_load(
-                model_name, lazy=lazy_weights, revision=revision
-            )
+            with mlx_vlm_processor_scope():
+                model, tokenizer = mlx_vlm_load(
+                    model_name, lazy=lazy_weights, revision=revision
+                )
 
         elif awq_loader is not None:
             load_label = "AWQ model"

@@ -11,6 +11,7 @@ import pytest
 import torch
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItem
 
+from vllm_metal.compat import mlx_vlm_processor_scope
 from vllm_metal.multimodal import MultiModalFeatureSpec, PlaceholderRange
 from vllm_metal.multimodal.lfm2_vl import Lfm2VlMultimodalAdapter
 
@@ -291,3 +292,52 @@ class TestCallLm:
                 [],
                 mx.zeros((3, 1, 1), dtype=mx.int32),
             )
+
+
+class TestProcessorScope:
+    """mlx-vlm's global processor rebinding must not outlive the model load.
+
+    Importing ``mlx_vlm.models.lfm2_vl`` replaces transformers'
+    ``Lfm2VlProcessor.__init__``, ``.from_pretrained`` and ``.__call__`` so every
+    instance swaps in a NumPy image processor. vLLM then receives
+    ``numpy.ndarray`` where its ``NestedTensors`` contract requires
+    ``torch.Tensor``, and ``MultiModalFlatField.build_elems`` asserts while the
+    scheduler profiles the encoder budget.
+    """
+
+    @staticmethod
+    def _processor_cls() -> Any:
+        module = pytest.importorskip("transformers.models.lfm2_vl.processing_lfm2_vl")
+        return module.Lfm2VlProcessor
+
+    def test_rebound_attributes_are_restored(self) -> None:
+        cls = self._processor_cls()
+        original_init = cls.__init__
+        sentinel = object()
+
+        with mlx_vlm_processor_scope():
+            cls.__init__ = sentinel  # type: ignore[assignment]
+            cls.from_pretrained = sentinel  # type: ignore[assignment]
+
+        assert cls.__init__ is original_init
+
+    def test_inherited_attribute_is_not_left_shadowed(self) -> None:
+        """``from_pretrained`` comes from ``ProcessorMixin``, not the subclass.
+
+        Restoring by assignment would leave a shadowing copy in the subclass
+        dict, so the scope has to delete what it did not find there.
+        """
+        cls = self._processor_cls()
+        was_own = "from_pretrained" in cls.__dict__
+
+        with mlx_vlm_processor_scope():
+            cls.from_pretrained = object()  # type: ignore[assignment]
+
+        assert ("from_pretrained" in cls.__dict__) is was_own
+
+    def test_untouched_attributes_are_left_alone(self) -> None:
+        cls = self._processor_cls()
+        before = cls.__init__
+        with mlx_vlm_processor_scope():
+            pass
+        assert cls.__init__ is before
