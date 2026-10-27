@@ -138,11 +138,7 @@ class Lfm2VlMultimodalAdapter:
                 spatial_shapes=spatial_shapes,
                 pixel_attention_mask=mask,
             )
-            hidden_states = (
-                views
-                if isinstance(views, mx.array)
-                else mx.concatenate(list(views), axis=0)
-            )
+            hidden_states = mx.concatenate(views, axis=0)
 
             expected = feature.mm_position.get_num_embeds()
             if int(hidden_states.shape[0]) != expected:
@@ -224,9 +220,8 @@ class Lfm2VlMultimodalAdapter:
         if deepstack_visual_embeds is not None:
             raise RuntimeError("LFM2-VL does not expose deepstack visual residuals.")
 
-    @classmethod
+    @staticmethod
     def _tile_lengths(
-        cls,
         identifier: str,
         pixel_values: mx.array,
         spatial_shapes: mx.array,

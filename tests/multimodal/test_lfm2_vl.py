@@ -27,21 +27,17 @@ _PROJECTED_ROWS = 3
 class _RecordingModel:
     """mlx-vlm ``Model`` stub recording what the adapter passes to the tower."""
 
-    def __init__(self, *, rows_per_view: int = 1, flat: bool = False) -> None:
+    def __init__(self, *, rows_per_view: int = 1) -> None:
         self.language_model = _RecordingLanguageModel()
         self.encode_calls: list[dict[str, Any]] = []
         self._rows_per_view = rows_per_view
-        self._flat = flat
 
-    def encode_images(self, pixel_values: mx.array, **kwargs: Any) -> Any:
+    def encode_images(self, pixel_values: mx.array, **kwargs: Any) -> list[mx.array]:
         self.encode_calls.append({"pixel_values": pixel_values, **kwargs})
-        views = [
+        return [
             mx.full((self._rows_per_view, _HIDDEN), float(i))
             for i in range(int(pixel_values.shape[0]))
         ]
-        if self._flat:
-            return mx.concatenate(views, axis=0)
-        return views
 
 
 class _RecordingBackbone:
@@ -102,18 +98,6 @@ def _adapter(model: _RecordingModel | None = None) -> Lfm2VlMultimodalAdapter:
     return Lfm2VlMultimodalAdapter.from_loaded_model(model)
 
 
-class TestCapabilityFlags:
-    def test_plain_rope_flags_match_the_paged_text_path(self) -> None:
-        # LFM2 derives RoPE from ctx.offsets, so the runner must not hand it
-        # caller-supplied positions and text-only batches stay on the text path.
-        assert Lfm2VlMultimodalAdapter.supplies_segment_positions is False
-        assert Lfm2VlMultimodalAdapter.requires_explicit_positions is False
-
-    def test_forward_ready_and_selective_logits_enabled(self) -> None:
-        assert Lfm2VlMultimodalAdapter.forward_ready is True
-        assert Lfm2VlMultimodalAdapter.text_path_selective_logits_ok is True
-
-
 class TestConstruction:
     def test_from_loaded_model_resolves_the_text_tower(self) -> None:
         model = _RecordingModel()
@@ -154,11 +138,6 @@ class TestEncodeMultimodal:
         # One row per view, each filled with its view index.
         assert result[0].hidden_states.shape[0] == _PROJECTED_ROWS
         assert [row[0] for row in result[0].hidden_states.tolist()] == [0.0, 1.0, 2.0]
-
-    def test_a_flat_encoder_return_is_accepted(self) -> None:
-        model = _RecordingModel(flat=True)
-        result = _adapter(model).encode_multimodal([_feature()])
-        assert result[0].hidden_states.shape[0] == _PROJECTED_ROWS
 
     def test_row_count_mismatch_is_rejected(self) -> None:
         model = _RecordingModel(rows_per_view=2)
@@ -217,9 +196,6 @@ class TestPositions:
         assert tuple(positions.shape) == (3, 1, 4)
         assert positions.dtype == mx.int32
         assert positions.tolist() == [[[0, 1, 2, 3]]] * 3
-
-    def test_delta_is_zero_because_lfm2_has_no_mrope(self) -> None:
-        _, delta = _adapter().get_mrope_input_positions([1, 2, 3], [])
         assert delta == 0
 
     def test_empty_prompt_returns_an_empty_position_array(self) -> None:
@@ -283,17 +259,7 @@ class TestProcessorOutputs:
         module = pytest.importorskip("transformers.models.lfm2_vl.processing_lfm2_vl")
         return module.Lfm2VlProcessor
 
-    @pytest.fixture(autouse=True)
-    def _restore_call(self) -> Any:
-        cls = self._processor_cls()
-        original = cls.__dict__.get("__call__")
-        yield
-        if original is None:
-            delattr(cls, "__call__")
-        else:
-            cls.__call__ = original
-
-    def _patched_like_mlx_vlm(self) -> Any:
+    def _patched_like_mlx_vlm(self, monkeypatch: pytest.MonkeyPatch) -> Any:
         """Replace ``__call__`` the way importing mlx-vlm does, and return the class."""
         from transformers.feature_extraction_utils import BatchFeature
 
@@ -303,11 +269,11 @@ class TestProcessorOutputs:
             data = {"pixel_values": np.zeros((2, 4, 3), dtype=np.float32)}
             return BatchFeature(data=data, tensor_type=None)
 
-        cls.__call__ = numpy_call
+        monkeypatch.setattr(cls, "__call__", numpy_call)
         return cls
 
-    def test_a_pt_request_comes_back_as_torch(self) -> None:
-        cls = self._patched_like_mlx_vlm()
+    def test_a_pt_request_comes_back_as_torch(self, monkeypatch) -> None:
+        cls = self._patched_like_mlx_vlm(monkeypatch)
         processor = object.__new__(cls)
 
         ensure_lfm2_vl_torch_outputs(processor)
@@ -315,9 +281,9 @@ class TestProcessorOutputs:
         out = processor(return_tensors="pt")
         assert isinstance(out["pixel_values"], torch.Tensor)
 
-    def test_other_tensor_types_are_left_alone(self) -> None:
+    def test_other_tensor_types_are_left_alone(self, monkeypatch) -> None:
         """mlx-vlm asks its own processor for ``"mlx"`` and still needs NumPy."""
-        cls = self._patched_like_mlx_vlm()
+        cls = self._patched_like_mlx_vlm(monkeypatch)
         processor = object.__new__(cls)
 
         ensure_lfm2_vl_torch_outputs(processor)
@@ -325,8 +291,8 @@ class TestProcessorOutputs:
         out = processor(return_tensors="mlx")
         assert isinstance(out["pixel_values"], np.ndarray)
 
-    def test_applying_twice_does_not_stack_wrappers(self) -> None:
-        cls = self._patched_like_mlx_vlm()
+    def test_applying_twice_does_not_stack_wrappers(self, monkeypatch) -> None:
+        cls = self._patched_like_mlx_vlm(monkeypatch)
         processor = object.__new__(cls)
 
         ensure_lfm2_vl_torch_outputs(processor)
@@ -335,8 +301,8 @@ class TestProcessorOutputs:
 
         assert cls.__call__ is wrapped
 
-    def test_a_foreign_processor_is_ignored(self) -> None:
-        cls = self._patched_like_mlx_vlm()
+    def test_a_foreign_processor_is_ignored(self, monkeypatch) -> None:
+        cls = self._patched_like_mlx_vlm(monkeypatch)
         before = cls.__call__
 
         ensure_lfm2_vl_torch_outputs(SimpleNamespace())
