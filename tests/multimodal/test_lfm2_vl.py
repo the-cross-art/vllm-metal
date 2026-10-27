@@ -16,7 +16,6 @@ from vllm_metal.compat import ensure_lfm2_vl_torch_outputs
 from vllm_metal.multimodal import MultiModalFeatureSpec, PlaceholderRange
 from vllm_metal.multimodal.lfm2_vl import Lfm2VlMultimodalAdapter
 
-_IMAGE_TOKEN_INDEX = 396
 _FEATURE_DIM = 8
 _HIDDEN = 4
 # Two tiles plus a thumbnail, padded to the largest tile's patch count.
@@ -29,7 +28,6 @@ class _RecordingModel:
     """mlx-vlm ``Model`` stub recording what the adapter passes to the tower."""
 
     def __init__(self, *, rows_per_view: int = 1, flat: bool = False) -> None:
-        self.config = SimpleNamespace(image_token_index=_IMAGE_TOKEN_INDEX)
         self.language_model = _RecordingLanguageModel()
         self.encode_calls: list[dict[str, Any]] = []
         self._rows_per_view = rows_per_view
@@ -128,26 +126,9 @@ class TestConstruction:
         assert out.tolist() == [[2, 3, 4]]
 
     def test_missing_encode_images_is_rejected(self) -> None:
-        broken = SimpleNamespace(
-            language_model=_RecordingLanguageModel(),
-            config=SimpleNamespace(image_token_index=_IMAGE_TOKEN_INDEX),
-        )
+        broken = SimpleNamespace(language_model=_RecordingLanguageModel())
         with pytest.raises(RuntimeError, match="encode_images missing"):
             Lfm2VlMultimodalAdapter.from_loaded_model(broken)
-
-    def test_missing_image_token_index_is_rejected(self) -> None:
-        model = _RecordingModel()
-        model.config = SimpleNamespace(image_token_index=None)
-        with pytest.raises(RuntimeError, match="image_token_index missing"):
-            Lfm2VlMultimodalAdapter.from_loaded_model(model)
-
-    def test_encode_without_construction_helper_is_rejected(self) -> None:
-        with pytest.raises(RuntimeError, match="model not loaded"):
-            Lfm2VlMultimodalAdapter().encode_multimodal([_feature()])
-
-    def test_embed_tokens_without_construction_helper_is_rejected(self) -> None:
-        with pytest.raises(RuntimeError, match="embed_tokens_fn not resolved"):
-            Lfm2VlMultimodalAdapter().embed_tokens(mx.array([[1]], dtype=mx.int32))
 
 
 class TestEncodeMultimodal:
@@ -283,15 +264,6 @@ class TestCallLm:
                 [],
                 mx.zeros((3, 1, 1), dtype=mx.int32),
                 deepstack_visual_embeds=object(),
-            )
-
-    def test_call_lm_without_construction_helper_is_rejected(self) -> None:
-        with pytest.raises(RuntimeError, match="language_model not loaded"):
-            Lfm2VlMultimodalAdapter().call_lm(
-                mx.array([[1]], dtype=mx.int32),
-                mx.zeros((1, 1, _HIDDEN)),
-                [],
-                mx.zeros((3, 1, 1), dtype=mx.int32),
             )
 
 

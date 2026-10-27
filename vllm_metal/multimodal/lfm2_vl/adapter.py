@@ -52,10 +52,10 @@ class Lfm2VlMultimodalAdapter:
     def __init__(
         self,
         *,
-        model: Any | None = None,
-        language_model: Any | None = None,
-        embed_tokens_fn: Any | None = None,
-        backbone: Any | None = None,
+        model: Any,
+        language_model: Any,
+        embed_tokens_fn: Any,
+        backbone: Any,
     ) -> None:
         self._model = model
         self._language_model = language_model
@@ -69,11 +69,6 @@ class Lfm2VlMultimodalAdapter:
         if not hasattr(model, "encode_images"):
             raise RuntimeError(
                 "Lfm2Vl model.encode_images missing; mlx_vlm version drift detected."
-            )
-        if getattr(model.config, "image_token_index", None) is None:
-            raise RuntimeError(
-                "Lfm2Vl config.image_token_index missing; mlx_vlm version "
-                "drift detected."
             )
         backbone = resolve_text_backbone(language_model, owner="mlx_vlm")
         if not callable(backbone):
@@ -93,11 +88,6 @@ class Lfm2VlMultimodalAdapter:
         return self._language_model
 
     def embed_tokens(self, input_ids: mx.array) -> mx.array:
-        if self._embed_tokens_fn is None:
-            raise RuntimeError(
-                "embed_tokens_fn not resolved; construct via "
-                "Lfm2VlMultimodalAdapter.from_loaded_model."
-            )
         return self._embed_tokens_fn(input_ids)
 
     def encode_multimodal(
@@ -105,12 +95,6 @@ class Lfm2VlMultimodalAdapter:
         features: list[MultiModalFeatureSpec],
     ) -> list[Lfm2VlVisionEncodeResult]:
         """Run LFM2-VL's vision tower and projector for each image feature."""
-        if self._model is None:
-            raise RuntimeError(
-                "model not loaded; encode_multimodal unavailable. Construct "
-                "via Lfm2VlMultimodalAdapter.from_loaded_model."
-            )
-
         outputs: list[Lfm2VlVisionEncodeResult] = []
         for feature in features:
             if feature.modality == "video":
@@ -206,7 +190,7 @@ class Lfm2VlMultimodalAdapter:
     ) -> Any:
         """Invoke the LFM2-VL language model on runner-built embeddings."""
         del visual_pos_masks, position_ids
-        self._check_lm_ready("call_lm", deepstack_visual_embeds)
+        self._check_deepstack(deepstack_visual_embeds)
         # ``input_embeddings`` is the name both the LFM2 ``LanguageModel`` and
         # its ``Lfm2Model`` backbone declare; the wrapper also accepts
         # ``inputs_embeds`` but the backbone does not.
@@ -228,25 +212,15 @@ class Lfm2VlMultimodalAdapter:
     ) -> mx.array:
         """:meth:`call_lm` without the output head: the backbone's hidden states."""
         del visual_pos_masks, position_ids
-        self._check_lm_ready("call_lm_hidden_states", deepstack_visual_embeds)
-        if self._backbone is None or not callable(self._backbone):
-            raise RuntimeError(
-                "language_model.model attribute missing or not callable; "
-                "mlx_vlm version drift detected. Expected the LFM2 text "
-                "backbone."
-            )
+        self._check_deepstack(deepstack_visual_embeds)
         return self._backbone(
             input_ids,
             cache=cache,
             input_embeddings=inputs_embeds,
         )
 
-    def _check_lm_ready(self, call: str, deepstack_visual_embeds: Any | None) -> None:
-        if self._language_model is None:
-            raise RuntimeError(
-                f"language_model not loaded; {call} unavailable. Construct "
-                "via Lfm2VlMultimodalAdapter.from_loaded_model."
-            )
+    @staticmethod
+    def _check_deepstack(deepstack_visual_embeds: Any | None) -> None:
         if deepstack_visual_embeds is not None:
             raise RuntimeError("LFM2-VL does not expose deepstack visual residuals.")
 

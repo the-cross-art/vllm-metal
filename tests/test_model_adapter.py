@@ -938,7 +938,6 @@ class TestBuildMultimodalAdapter:
         # "lfm2_vl", the 450M MLX conversions use "lfm2-vl".
         language_model = _Lfm2VlLanguageModelStub()
         model = SimpleNamespace(
-            config=SimpleNamespace(image_token_index=396),
             language_model=language_model,
             encode_images=lambda *a, **k: [],
         )
@@ -951,7 +950,6 @@ class TestBuildMultimodalAdapter:
 
     def test_builds_lfm2_vl_adapter_from_architecture(self) -> None:
         model = SimpleNamespace(
-            config=SimpleNamespace(image_token_index=396),
             language_model=_Lfm2VlLanguageModelStub(),
             encode_images=lambda *a, **k: [],
         )
