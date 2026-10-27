@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import mlx.core as mx
 import torch
@@ -277,7 +277,10 @@ class Lfm2VlMultimodalAdapter:
             )
         padded = int(pixel_values.shape[1])
         lengths: list[int] = []
-        for index, shape in enumerate(spatial_shapes.tolist()):
+        # The shape checks above pin this to (tiles, 2), which mx.array.tolist()
+        # cannot express in its return type.
+        rows = cast(list[list[int]], spatial_shapes.tolist())
+        for index, shape in enumerate(rows):
             height, width = (int(value) for value in shape)
             if height <= 0 or width <= 0:
                 raise ValueError(
