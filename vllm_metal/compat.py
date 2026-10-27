@@ -8,7 +8,6 @@ diagnosable.
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 from collections.abc import Callable, Iterator, Mapping
@@ -950,72 +949,44 @@ def _wrap_model_sanitize(
     return True
 
 
-_MLX_VLM_PATCHED_PROCESSORS: tuple[tuple[str, str], ...] = (
-    ("transformers.models.lfm2_vl.processing_lfm2_vl", "Lfm2VlProcessor"),
-)
-_MLX_VLM_PATCHED_ATTRS: tuple[str, ...] = ("__init__", "from_pretrained", "__call__")
-_MISSING = object()
-
-
-def _processor_classes_to_restore() -> list[tuple[Any, dict[str, Any]]]:
-    """Snapshot the processor class attributes mlx-vlm rebinds on import."""
-    snapshots: list[tuple[Any, dict[str, Any]]] = []
-    for module_name, cls_name in _MLX_VLM_PATCHED_PROCESSORS:
-        try:
-            module = importlib.import_module(module_name)
-        except ImportError as exc:
-            logger.debug("Skipping %s processor snapshot: %s", cls_name, exc)
-            continue
-        cls = getattr(module, cls_name, None)
-        if cls is None:
-            continue
-        snapshots.append(
-            (
-                cls,
-                {
-                    name: cls.__dict__.get(name, _MISSING)
-                    for name in _MLX_VLM_PATCHED_ATTRS
-                },
-            )
-        )
-    return snapshots
-
-
-@contextmanager
-def mlx_vlm_processor_scope() -> Iterator[None]:
-    """Keep mlx-vlm's global processor rebinding out of vLLM's processing path.
+def ensure_lfm2_vl_torch_outputs(processor: Any) -> None:
+    """Make transformers' LFM2-VL processor honor ``return_tensors="pt"`` again.
 
     Importing ``mlx_vlm.models.lfm2_vl`` rebinds transformers'
-    ``Lfm2VlProcessor.__init__``, ``.from_pretrained`` and ``.__call__`` so every
-    instance swaps in mlx-vlm's ``Lfm2VlNumpyImageProcessor``, which returns
-    ``numpy.ndarray``. vLLM's ``NestedTensors`` contract is ``torch.Tensor``, and
+    ``Lfm2VlProcessor.__init__`` and ``.__call__`` so every instance swaps in
+    mlx-vlm's ``Lfm2VlNumpyImageProcessor``, which returns ``numpy.ndarray``.
+    vLLM's ``NestedTensors`` contract is ``torch.Tensor``, and
     ``MultiModalFieldConfig.flat_from_sizes`` always builds tuple slices, so
     ``MultiModalFlatField.build_elems`` asserts "torch.Tensor is required for
     multiple slices" while the scheduler profiles the encoder budget — the engine
     dies before serving a request.
 
-    mlx-vlm needs the NumPy processor for its own forward path, and the processor
-    instance it returns from ``load`` keeps it: restoring the class attributes
-    afterwards only affects instances vLLM builds later, which are the ones that
-    must honor vLLM's contract.
+    Only ``"pt"`` requests are converted. mlx-vlm asks its own processor for
+    ``"mlx"``, so its forward path keeps the NumPy image processor it needs.
     """
-    snapshots = _processor_classes_to_restore()
     try:
-        yield
-    finally:
-        for cls, attrs in snapshots:
-            for name, original in attrs.items():
-                current = cls.__dict__.get(name, _MISSING)
-                if current is original:
-                    continue
-                if original is _MISSING:
-                    try:
-                        delattr(cls, name)
-                    except AttributeError:
-                        pass
-                else:
-                    setattr(cls, name, original)
-                logger.debug("Restored %s.%s after mlx-vlm load", cls.__name__, name)
+        from transformers.models.lfm2_vl.processing_lfm2_vl import Lfm2VlProcessor
+    except ImportError as exc:
+        logger.debug("Skipping the LFM2-VL processor conversion: %s", exc)
+        return
+
+    if not isinstance(processor, Lfm2VlProcessor):
+        return
+
+    original = Lfm2VlProcessor.__call__
+    if getattr(original, "_metal_torch_outputs", False):
+        return
+
+    @wraps(original)
+    def call(self: Any, *args: Any, **kwargs: Any) -> Any:
+        output = original(self, *args, **kwargs)
+        if kwargs.get("return_tensors") == "pt":
+            output.convert_to_tensors("pt")
+        return output
+
+    call._metal_torch_outputs = True
+    Lfm2VlProcessor.__call__ = call
+    logger.debug("LFM2-VL processor output will be converted to torch tensors")
 
 
 @contextmanager

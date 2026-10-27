@@ -7,11 +7,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import mlx.core as mx
+import numpy as np
 import pytest
 import torch
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItem
 
-from vllm_metal.compat import mlx_vlm_processor_scope
+from vllm_metal.compat import ensure_lfm2_vl_torch_outputs
 from vllm_metal.multimodal import MultiModalFeatureSpec, PlaceholderRange
 from vllm_metal.multimodal.lfm2_vl import Lfm2VlMultimodalAdapter
 
@@ -294,15 +295,15 @@ class TestCallLm:
             )
 
 
-class TestProcessorScope:
-    """mlx-vlm's global processor rebinding must not outlive the model load.
+class TestProcessorOutputs:
+    """vLLM must receive torch tensors from transformers' LFM2-VL processor.
 
-    Importing ``mlx_vlm.models.lfm2_vl`` replaces transformers'
-    ``Lfm2VlProcessor.__init__``, ``.from_pretrained`` and ``.__call__`` so every
-    instance swaps in a NumPy image processor. vLLM then receives
-    ``numpy.ndarray`` where its ``NestedTensors`` contract requires
-    ``torch.Tensor``, and ``MultiModalFlatField.build_elems`` asserts while the
-    scheduler profiles the encoder budget.
+    Importing ``mlx_vlm.models.lfm2_vl`` rebinds that processor so every
+    instance swaps in a NumPy image processor. vLLM then gets ``numpy.ndarray``
+    where its ``NestedTensors`` contract requires ``torch.Tensor``, and
+    ``MultiModalFlatField.build_elems`` asserts while the scheduler profiles the
+    encoder budget. These tests stand in a NumPy-returning ``__call__`` for
+    mlx-vlm's, so they need no checkpoint.
     """
 
     @staticmethod
@@ -310,34 +311,62 @@ class TestProcessorScope:
         module = pytest.importorskip("transformers.models.lfm2_vl.processing_lfm2_vl")
         return module.Lfm2VlProcessor
 
-    def test_rebound_attributes_are_restored(self) -> None:
+    @pytest.fixture(autouse=True)
+    def _restore_call(self) -> Any:
         cls = self._processor_cls()
-        original_init = cls.__init__
-        sentinel = object()
+        original = cls.__dict__.get("__call__")
+        yield
+        if original is None:
+            delattr(cls, "__call__")
+        else:
+            cls.__call__ = original
 
-        with mlx_vlm_processor_scope():
-            cls.__init__ = sentinel  # type: ignore[assignment]
-            cls.from_pretrained = sentinel  # type: ignore[assignment]
+    def _patched_like_mlx_vlm(self) -> Any:
+        """Replace ``__call__`` the way importing mlx-vlm does, and return the class."""
+        from transformers.feature_extraction_utils import BatchFeature
 
-        assert cls.__init__ is original_init
-
-    def test_inherited_attribute_is_not_left_shadowed(self) -> None:
-        """``from_pretrained`` comes from ``ProcessorMixin``, not the subclass.
-
-        Restoring by assignment would leave a shadowing copy in the subclass
-        dict, so the scope has to delete what it did not find there.
-        """
         cls = self._processor_cls()
-        was_own = "from_pretrained" in cls.__dict__
 
-        with mlx_vlm_processor_scope():
-            cls.from_pretrained = object()  # type: ignore[assignment]
+        def numpy_call(self: Any, **kwargs: Any) -> Any:
+            data = {"pixel_values": np.zeros((2, 4, 3), dtype=np.float32)}
+            return BatchFeature(data=data, tensor_type=None)
 
-        assert ("from_pretrained" in cls.__dict__) is was_own
+        cls.__call__ = numpy_call
+        return cls
 
-    def test_untouched_attributes_are_left_alone(self) -> None:
-        cls = self._processor_cls()
-        before = cls.__init__
-        with mlx_vlm_processor_scope():
-            pass
-        assert cls.__init__ is before
+    def test_a_pt_request_comes_back_as_torch(self) -> None:
+        cls = self._patched_like_mlx_vlm()
+        processor = object.__new__(cls)
+
+        ensure_lfm2_vl_torch_outputs(processor)
+
+        out = processor(return_tensors="pt")
+        assert isinstance(out["pixel_values"], torch.Tensor)
+
+    def test_other_tensor_types_are_left_alone(self) -> None:
+        """mlx-vlm asks its own processor for ``"mlx"`` and still needs NumPy."""
+        cls = self._patched_like_mlx_vlm()
+        processor = object.__new__(cls)
+
+        ensure_lfm2_vl_torch_outputs(processor)
+
+        out = processor(return_tensors="mlx")
+        assert isinstance(out["pixel_values"], np.ndarray)
+
+    def test_applying_twice_does_not_stack_wrappers(self) -> None:
+        cls = self._patched_like_mlx_vlm()
+        processor = object.__new__(cls)
+
+        ensure_lfm2_vl_torch_outputs(processor)
+        wrapped = cls.__call__
+        ensure_lfm2_vl_torch_outputs(processor)
+
+        assert cls.__call__ is wrapped
+
+    def test_a_foreign_processor_is_ignored(self) -> None:
+        cls = self._patched_like_mlx_vlm()
+        before = cls.__call__
+
+        ensure_lfm2_vl_torch_outputs(SimpleNamespace())
+
+        assert cls.__call__ is before

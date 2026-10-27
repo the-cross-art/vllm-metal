@@ -19,7 +19,7 @@ from vllm_metal.attention.runtime.factory import build_hybrid_runtime_plan
 from vllm_metal.compat import (
     apply_compat_patches,
     embedding_load_scope,
-    mlx_vlm_processor_scope,
+    ensure_lfm2_vl_torch_outputs,
 )
 from vllm_metal.compiled_mlp import CompiledMLPBlocks
 from vllm_metal.config import get_config
@@ -410,10 +410,10 @@ class ModelLifecycle:
 
         elif is_vlm:
             load_label = "MLX-VLM model"
-            with mlx_vlm_processor_scope():
-                model, tokenizer = mlx_vlm_load(
-                    model_name, lazy=lazy_weights, revision=revision
-                )
+            model, tokenizer = mlx_vlm_load(
+                model_name, lazy=lazy_weights, revision=revision
+            )
+            ensure_lfm2_vl_torch_outputs(tokenizer)
 
         elif awq_loader is not None:
             load_label = "AWQ model"
