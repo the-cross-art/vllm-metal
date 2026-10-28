@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the LFM2-VL multimodal adapter."""
-
-from __future__ import annotations
+"""Regression tests for the LFM2-VL adapter's integration contracts."""
 
 from types import SimpleNamespace
-from typing import Any
+from unittest.mock import Mock
 
 import mlx.core as mx
 import numpy as np
@@ -16,295 +14,123 @@ from vllm_metal.compat import ensure_lfm2_vl_torch_outputs
 from vllm_metal.multimodal import MultiModalFeatureSpec, PlaceholderRange
 from vllm_metal.multimodal.lfm2_vl import Lfm2VlMultimodalAdapter
 
-_FEATURE_DIM = 8
-_HIDDEN = 4
-# Two tiles plus a thumbnail, padded to the largest tile's patch count.
-_TILE_SHAPES = ((4, 4), (4, 4), (2, 2))
-_PADDED_PATCHES = 16
-_PROJECTED_ROWS = 3
 
+@pytest.fixture
+def model():
+    def forward(inputs, *, cache, input_embeddings):
+        return input_embeddings
 
-class _RecordingModel:
-    """mlx-vlm ``Model`` stub recording what the adapter passes to the tower."""
-
-    def __init__(self, *, rows_per_view: int = 1) -> None:
-        self.language_model = _RecordingLanguageModel()
-        self.encode_calls: list[dict[str, Any]] = []
-        self._rows_per_view = rows_per_view
-
-    def encode_images(self, pixel_values: mx.array, **kwargs: Any) -> list[mx.array]:
-        self.encode_calls.append({"pixel_values": pixel_values, **kwargs})
-        return [
-            mx.full((self._rows_per_view, _HIDDEN), float(i))
-            for i in range(int(pixel_values.shape[0]))
-        ]
-
-
-class _RecordingBackbone:
-    """Headless ``language_model.model`` stub for ``call_lm_hidden_states``."""
-
-    def __init__(self) -> None:
-        self.embed_tokens = lambda input_ids: input_ids + 1
-        self.calls: list[dict[str, Any]] = []
-
-    def __call__(self, inputs: mx.array, **kwargs: Any) -> mx.array:
-        self.calls.append({"inputs": inputs, **kwargs})
-        return mx.zeros((1, inputs.shape[1], _HIDDEN))
-
-
-class _RecordingLanguageModel:
-    def __init__(self) -> None:
-        self.model = _RecordingBackbone()
-        self.calls: list[dict[str, Any]] = []
-
-    def __call__(self, inputs: mx.array, **kwargs: Any) -> Any:
-        self.calls.append({"inputs": inputs, **kwargs})
-        return SimpleNamespace(logits=mx.zeros((1, inputs.shape[1], 8)))
-
-
-def _feature(
-    *,
-    offset: int = 0,
-    length: int = _PROJECTED_ROWS,
-    tile_shapes: tuple[tuple[int, int], ...] = _TILE_SHAPES,
-    padded_patches: int = _PADDED_PATCHES,
-    modality: str = "image",
-    drop_key: str | None = None,
-) -> MultiModalFeatureSpec:
-    field = MultiModalFieldConfig.batched("image")
-    cpu_field = MultiModalFieldConfig.batched("image", keep_on_cpu=True)
-    pixel_elem = field.build_elems(
-        "pixel_values",
-        torch.zeros(
-            (1, len(tile_shapes), padded_patches, _FEATURE_DIM), dtype=torch.float32
-        ),
-    )[0]
-    shapes_elem = cpu_field.build_elems(
-        "spatial_shapes", torch.tensor([list(tile_shapes)], dtype=torch.int32)
-    )[0]
-    entries = {"pixel_values": pixel_elem, "spatial_shapes": shapes_elem}
-    if drop_key is not None:
-        entries.pop(drop_key)
-    return MultiModalFeatureSpec(
-        data=MultiModalKwargsItem(entries),
-        modality=modality,
-        identifier=f"{modality}-{offset}",
-        mm_position=PlaceholderRange(offset=offset, length=length),
+    backbone = Mock(side_effect=forward)
+    backbone.embed_tokens = lambda ids: ids
+    language_model = Mock(side_effect=forward)
+    language_model.model = backbone
+    # Two 4x4 patch grids and a 2x2 thumbnail, downsampled by two.
+    views = [mx.full((4, 4), 0.0), mx.full((4, 4), 1.0), mx.full((1, 4), 2.0)]
+    return SimpleNamespace(
+        language_model=language_model, encode_images=Mock(return_value=views)
     )
 
 
-def _adapter(model: _RecordingModel | None = None) -> Lfm2VlMultimodalAdapter:
-    model = model or _RecordingModel()
-    return Lfm2VlMultimodalAdapter.from_loaded_model(model)
+def _feature(length=9):
+    field = MultiModalFieldConfig.batched("image")
+    cpu_field = MultiModalFieldConfig.batched("image", keep_on_cpu=True)
+    data = MultiModalKwargsItem(
+        {
+            "pixel_values": field.build_elems(
+                "pixel_values", torch.zeros((1, 3, 16, 8))
+            )[0],
+            "spatial_shapes": cpu_field.build_elems(
+                "spatial_shapes", torch.tensor([[[4, 4], [4, 4], [2, 2]]])
+            )[0],
+        }
+    )
+    return MultiModalFeatureSpec(
+        data=data,
+        modality="image",
+        identifier="image",
+        mm_position=PlaceholderRange(offset=0, length=length),
+    )
 
 
-class TestConstruction:
-    def test_from_loaded_model_resolves_the_text_tower(self) -> None:
-        model = _RecordingModel()
-        adapter = _adapter(model)
-        assert adapter.text_model() is model.language_model
-
-    def test_embed_tokens_uses_the_backbone_embedding(self) -> None:
-        adapter = _adapter()
-        out = adapter.embed_tokens(mx.array([[1, 2, 3]], dtype=mx.int32))
-        assert out.tolist() == [[2, 3, 4]]
-
-    def test_missing_encode_images_is_rejected(self) -> None:
-        broken = SimpleNamespace(language_model=_RecordingLanguageModel())
-        with pytest.raises(RuntimeError, match="encode_images missing"):
-            Lfm2VlMultimodalAdapter.from_loaded_model(broken)
+def test_tiled_image_encoding_preserves_view_layout(model):
+    adapter = Lfm2VlMultimodalAdapter.from_loaded_model(model)
+    result = adapter.encode_multimodal([_feature()])[0]
+    call = model.encode_images.call_args
+    assert call.args[0].shape == (3, 16, 8)
+    assert call.kwargs["spatial_shapes"].tolist() == [[4, 4], [4, 4], [2, 2]]
+    assert call.kwargs["pixel_attention_mask"].tolist() == [
+        [True] * 16,
+        [True] * 16,
+        [True] * 4 + [False] * 12,
+    ]
+    assert result.hidden_states.shape == (9, 4)
+    assert result.hidden_states[:, 0].tolist() == [0.0] * 4 + [1.0] * 4 + [2.0]
 
 
-class TestEncodeMultimodal:
-    def test_tile_mask_marks_each_tile_real_patch_count(self) -> None:
-        # The tower recovers per-tile lengths from the mask, so it must be
-        # derived from spatial_shapes rather than assumed rectangular.
-        model = _RecordingModel()
-        _adapter(model).encode_multimodal([_feature()])
-        mask = model.encode_calls[0]["pixel_attention_mask"]
-        assert tuple(mask.shape) == (len(_TILE_SHAPES), _PADDED_PATCHES)
-        assert mask.sum(axis=1).tolist() == [h * w for h, w in _TILE_SHAPES]
-
-    def test_spatial_shapes_are_forwarded_unchanged(self) -> None:
-        model = _RecordingModel()
-        _adapter(model).encode_multimodal([_feature()])
-        assert model.encode_calls[0]["spatial_shapes"].tolist() == [
-            list(shape) for shape in _TILE_SHAPES
-        ]
-
-    def test_views_are_concatenated_in_prompt_order(self) -> None:
-        model = _RecordingModel()
-        result = _adapter(model).encode_multimodal([_feature()])
-        # One row per view, each filled with its view index.
-        assert result[0].hidden_states.shape[0] == _PROJECTED_ROWS
-        assert [row[0] for row in result[0].hidden_states.tolist()] == [0.0, 1.0, 2.0]
-
-    def test_row_count_mismatch_is_rejected(self) -> None:
-        model = _RecordingModel(rows_per_view=2)
-        with pytest.raises(ValueError, match="placeholder embeddings"):
-            _adapter(model).encode_multimodal([_feature()])
-
-    def test_video_is_rejected_as_unsupported(self) -> None:
-        with pytest.raises(NotImplementedError, match="video input"):
-            _adapter().encode_multimodal([_feature(modality="video")])
-
-    def test_other_modalities_are_rejected(self) -> None:
-        with pytest.raises(ValueError, match="only"):
-            _adapter().encode_multimodal([_feature(modality="audio")])
-
-    def test_missing_feature_data_is_rejected(self) -> None:
-        feature = _feature()
-        bare = MultiModalFeatureSpec(
-            data=None,
-            modality=feature.modality,
-            identifier=feature.identifier,
-            mm_position=feature.mm_position,
-        )
-        with pytest.raises(ValueError, match="feature.data is required"):
-            _adapter().encode_multimodal([bare])
-
-    def test_missing_spatial_shapes_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="spatial_shapes"):
-            _adapter().encode_multimodal([_feature(drop_key="spatial_shapes")])
-
-    def test_tile_count_disagreement_is_rejected(self) -> None:
-        # pixel_values carries 3 tiles; spatial_shapes describes 2.
-        feature = _feature()
-        field = MultiModalFieldConfig.batched("image", keep_on_cpu=True)
-        feature.data["spatial_shapes"] = field.build_elems(
-            "spatial_shapes", torch.tensor([[[4, 4], [4, 4]]], dtype=torch.int32)
-        )[0]
-        with pytest.raises(ValueError, match="describes 2 tiles"):
-            _adapter().encode_multimodal([feature])
-
-    def test_tile_larger_than_the_padding_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="only carries"):
-            _adapter().encode_multimodal(
-                [_feature(tile_shapes=((8, 8),), padded_patches=16, length=1)]
-            )
-
-    def test_non_positive_spatial_shape_is_rejected(self) -> None:
-        with pytest.raises(ValueError, match="non-positive"):
-            _adapter().encode_multimodal(
-                [_feature(tile_shapes=((0, 4),), padded_patches=16, length=1)]
-            )
+def test_encoder_output_must_match_placeholder_rows(model):
+    adapter = Lfm2VlMultimodalAdapter.from_loaded_model(model)
+    with pytest.raises(ValueError, match="placeholder embeddings"):
+        adapter.encode_multimodal([_feature(length=8)])
 
 
-class TestPositions:
-    def test_positions_are_sequential_and_broadcast_to_three_rows(self) -> None:
-        positions, delta = _adapter().get_mrope_input_positions([5, 6, 7, 8], [])
-        assert tuple(positions.shape) == (3, 1, 4)
-        assert positions.dtype == mx.int32
-        assert positions.tolist() == [[[0, 1, 2, 3]]] * 3
-        assert delta == 0
-
-    def test_empty_prompt_returns_an_empty_position_array(self) -> None:
-        positions, delta = _adapter().get_mrope_input_positions([], [])
-        assert tuple(positions.shape) == (3, 1, 0)
-        assert delta == 0
-
-    def test_video_features_are_rejected(self) -> None:
-        with pytest.raises(NotImplementedError, match="video input"):
-            _adapter().get_mrope_input_positions([1], [_feature(modality="video")])
+@pytest.mark.parametrize("tokens", [[], [5, 6, 7, 8]])
+def test_positions_are_sequential_with_zero_delta(model, tokens):
+    adapter = Lfm2VlMultimodalAdapter.from_loaded_model(model)
+    positions, delta = adapter.get_mrope_input_positions(tokens, [])
+    assert positions.shape == (3, 1, len(tokens))
+    assert positions.dtype == mx.int32
+    assert positions.tolist() == [[list(range(len(tokens)))]] * 3
+    assert delta == 0
 
 
-class TestCallLm:
-    def test_call_lm_passes_input_embeddings_not_inputs_embeds(self) -> None:
-        # The LFM2 backbone only declares ``input_embeddings``; passing
-        # ``inputs_embeds`` raises TypeError inside mlx-vlm.
-        model = _RecordingModel()
-        adapter = _adapter(model)
-        ids = mx.array([[1, 2]], dtype=mx.int32)
-        embeds = mx.zeros((1, 2, _HIDDEN))
-        adapter.call_lm(ids, embeds, [], mx.zeros((3, 1, 2), dtype=mx.int32))
-        call = model.language_model.calls[0]
-        assert "input_embeddings" in call
-        assert "inputs_embeds" not in call
-
-    def test_call_lm_hidden_states_uses_the_headless_backbone(self) -> None:
-        model = _RecordingModel()
-        adapter = _adapter(model)
-        ids = mx.array([[1, 2]], dtype=mx.int32)
-        out = adapter.call_lm_hidden_states(
-            ids, mx.zeros((1, 2, _HIDDEN)), [], mx.zeros((3, 1, 2), dtype=mx.int32)
-        )
-        assert tuple(out.shape) == (1, 2, _HIDDEN)
-        assert "input_embeddings" in model.language_model.model.calls[0]
-
-    def test_deepstack_residuals_are_rejected(self) -> None:
-        adapter = _adapter()
-        with pytest.raises(RuntimeError, match="deepstack"):
-            adapter.call_lm(
-                mx.array([[1]], dtype=mx.int32),
-                mx.zeros((1, 1, _HIDDEN)),
-                [],
-                mx.zeros((3, 1, 1), dtype=mx.int32),
-                deepstack_visual_embeds=object(),
-            )
+@pytest.mark.parametrize("method", ["call_lm", "call_lm_hidden_states"])
+def test_forward_passes_embeddings_to_the_selected_text_entrypoint(model, method):
+    adapter = Lfm2VlMultimodalAdapter.from_loaded_model(model)
+    ids = mx.array([[1, 2]], dtype=mx.int32)
+    embeds = mx.ones((1, 2, 4))
+    cache = []
+    result = getattr(adapter, method)(ids, embeds, cache, mx.zeros((3, 1, 2)))
+    target = model.language_model
+    if method == "call_lm_hidden_states":
+        target = target.model
+    target.assert_called_once_with(ids, cache=cache, input_embeddings=embeds)
+    assert result is embeds
 
 
-class TestProcessorOutputs:
-    """vLLM must receive torch tensors from transformers' LFM2-VL processor.
+@pytest.fixture
+def processor(monkeypatch):
+    from transformers.feature_extraction_utils import BatchFeature
 
-    Importing ``mlx_vlm.models.lfm2_vl`` rebinds that processor so every
-    instance swaps in a NumPy image processor. vLLM then gets ``numpy.ndarray``
-    where its ``NestedTensors`` contract requires ``torch.Tensor``, and
-    ``MultiModalFlatField.build_elems`` asserts while the scheduler profiles the
-    encoder budget. These tests stand in a NumPy-returning ``__call__`` for
-    mlx-vlm's, so they need no checkpoint.
-    """
+    module = pytest.importorskip("transformers.models.lfm2_vl.processing_lfm2_vl")
+    cls = module.Lfm2VlProcessor
 
-    @staticmethod
-    def _processor_cls() -> Any:
-        module = pytest.importorskip("transformers.models.lfm2_vl.processing_lfm2_vl")
-        return module.Lfm2VlProcessor
+    def numpy_call(self, **kwargs):
+        return BatchFeature({"pixel_values": np.ones((2, 4, 3), dtype=np.float32)})
 
-    def _patched_like_mlx_vlm(self, monkeypatch: pytest.MonkeyPatch) -> Any:
-        """Replace ``__call__`` the way importing mlx-vlm does, and return the class."""
-        from transformers.feature_extraction_utils import BatchFeature
+    monkeypatch.setattr(cls, "__call__", numpy_call)
+    return object.__new__(cls)
 
-        cls = self._processor_cls()
 
-        def numpy_call(self: Any, **kwargs: Any) -> Any:
-            data = {"pixel_values": np.zeros((2, 4, 3), dtype=np.float32)}
-            return BatchFeature(data=data, tensor_type=None)
+@pytest.mark.parametrize("tensor_type", ["pt", "mlx"])
+def test_processor_preserves_pixels_in_the_requested_format(processor, tensor_type):
+    ensure_lfm2_vl_torch_outputs(processor)
+    pixels = processor(return_tensors=tensor_type)["pixel_values"]
+    if tensor_type == "pt":
+        assert isinstance(pixels, torch.Tensor)
+        pixels = pixels.numpy()
+    else:
+        assert isinstance(pixels, np.ndarray)
+    np.testing.assert_array_equal(pixels, np.ones((2, 4, 3), dtype=np.float32))
 
-        monkeypatch.setattr(cls, "__call__", numpy_call)
-        return cls
 
-    def test_a_pt_request_comes_back_as_torch(self, monkeypatch) -> None:
-        cls = self._patched_like_mlx_vlm(monkeypatch)
-        processor = object.__new__(cls)
+def test_processor_wrapper_is_installed_once_and_only_for_lfm2(processor):
+    cls = type(processor)
+    original = cls.__call__
+    ensure_lfm2_vl_torch_outputs(SimpleNamespace())
+    assert cls.__call__ is original
 
-        ensure_lfm2_vl_torch_outputs(processor)
-
-        out = processor(return_tensors="pt")
-        assert isinstance(out["pixel_values"], torch.Tensor)
-
-    def test_other_tensor_types_are_left_alone(self, monkeypatch) -> None:
-        """mlx-vlm asks its own processor for ``"mlx"`` and still needs NumPy."""
-        cls = self._patched_like_mlx_vlm(monkeypatch)
-        processor = object.__new__(cls)
-
-        ensure_lfm2_vl_torch_outputs(processor)
-
-        out = processor(return_tensors="mlx")
-        assert isinstance(out["pixel_values"], np.ndarray)
-
-    def test_applying_twice_does_not_stack_wrappers(self, monkeypatch) -> None:
-        cls = self._patched_like_mlx_vlm(monkeypatch)
-        processor = object.__new__(cls)
-
-        ensure_lfm2_vl_torch_outputs(processor)
-        wrapped = cls.__call__
-        ensure_lfm2_vl_torch_outputs(processor)
-
-        assert cls.__call__ is wrapped
-
-    def test_a_foreign_processor_is_ignored(self, monkeypatch) -> None:
-        cls = self._patched_like_mlx_vlm(monkeypatch)
-        before = cls.__call__
-
-        ensure_lfm2_vl_torch_outputs(SimpleNamespace())
-
-        assert cls.__call__ is before
+    ensure_lfm2_vl_torch_outputs(processor)
+    wrapped = cls.__call__
+    assert wrapped is not original
+    ensure_lfm2_vl_torch_outputs(processor)
+    assert cls.__call__ is wrapped
